@@ -419,8 +419,8 @@ with tab2:
             return colors.get(val, '')
         
         # Display
-        st.dataframe(
-            df.style.applymap(highlight_priority, subset=['priority']),
+      st.dataframe(
+            df.style.map(highlight_priority, subset=['priority']),
             use_container_width=True,
             column_config={
                 "linkedin_search": st.column_config.LinkColumn("LinkedIn"),
