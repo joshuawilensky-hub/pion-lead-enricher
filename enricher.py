@@ -7,6 +7,7 @@ Providers supported:
 - anthropic: Claude with web search ($0.01-0.02/lead)
 - openai: GPT-4o with web search ($0.02-0.03/lead)  
 - perplexity: Sonar with native search ($0.005-0.01/lead) - CHEAPEST
+- gemini: Gemini 1.5 Pro with Google Search ($0.010/lead)
 
 Usage:
     python enricher.py                           # Interactive mode, uses config
@@ -18,6 +19,7 @@ Environment variables (or use --config to set):
     ANTHROPIC_API_KEY
     OPENAI_API_KEY  
     PERPLEXITY_API_KEY
+    GEMINI_API_KEY
 """
 
 import os
@@ -68,9 +70,15 @@ DEFAULT_CONFIG = {
             "model": "gpt-4o",
             "cost_per_lead": 0.025,
             "enabled": True
+        },
+        "gemini": {
+            "api_key": "",
+            "model": "gemini-1.5-pro",
+            "cost_per_lead": 0.010,
+            "enabled": True
         }
     },
-    "waterfall_order": ["perplexity", "anthropic", "openai"],
+    "waterfall_order": ["perplexity", "anthropic", "openai", "gemini"],
     "default_provider": "perplexity"
 }
 
@@ -151,7 +159,7 @@ def configure_interactive():
     
     # Configure each provider
     console.print("\n[bold]Configure Providers:[/bold]")
-    for name in ["perplexity", "anthropic", "openai"]:
+    for name in ["perplexity", "anthropic", "openai", "gemini"]:
         settings = config["providers"].get(name, {})
         
         if Confirm.ask(f"\nConfigure {name}?", default=False):
@@ -179,14 +187,14 @@ def configure_interactive():
     
     if Confirm.ask("Change waterfall order?", default=False):
         console.print("  Enter provider names in order (comma-separated):")
-        console.print("  Available: perplexity, anthropic, openai")
-        order_input = Prompt.ask("  Order", default="perplexity,anthropic,openai")
+        console.print("  Available: perplexity, anthropic, openai, gemini")
+        order_input = Prompt.ask("  Order", default="perplexity,anthropic,openai,gemini")
         config["waterfall_order"] = [p.strip() for p in order_input.split(",")]
     
     # Default provider
     config["default_provider"] = Prompt.ask(
         "\nDefault provider",
-        choices=["perplexity", "anthropic", "openai"],
+        choices=["perplexity", "anthropic", "openai", "gemini"],
         default=config.get("default_provider", "perplexity")
     )
     
@@ -209,7 +217,8 @@ def get_api_key(provider: str, config: dict) -> Optional[str]:
     env_map = {
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
-        "perplexity": "PERPLEXITY_API_KEY"
+        "perplexity": "PERPLEXITY_API_KEY",
+        "gemini": "GEMINI_API_KEY"
     }
     return os.environ.get(env_map.get(provider, ""))
 
@@ -294,6 +303,31 @@ def enrich_with_perplexity(brand_name: str, api_key: str, model: str) -> dict:
     return parse_json_response(text_content, brand_name)
 
 
+def enrich_with_gemini(brand_name: str, api_key: str, model: str) -> dict:
+    """Research brand using Google Gemini with native search."""
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "google-generativeai", "-q"])
+        import google.generativeai as genai
+    
+    genai.configure(api_key=api_key)
+    
+    # Use Google Search tool for live web grounding if using a Pro model
+    tools = [{"google_search": {}}] if "pro" in model.lower() else None
+    
+    llm = genai.GenerativeModel(
+        model_name=model,
+        tools=tools,
+        system_instruction=SYSTEM_PROMPT
+    )
+    
+    response = llm.generate_content(f'Research "{brand_name}" restaurant for student discount status. Return only JSON.')
+    
+    return parse_json_response(response.text, brand_name)
+
+
 def parse_json_response(text: str, brand_name: str) -> dict:
     """Parse JSON from LLM response."""
     try:
@@ -325,7 +359,7 @@ def enrich_brand(brand_name: str, config: dict, provider: Optional[str] = None) 
     if provider:
         providers_to_try = [provider]
     else:
-        providers_to_try = config.get("waterfall_order", ["perplexity", "anthropic", "openai"])
+        providers_to_try = config.get("waterfall_order", ["perplexity", "anthropic", "openai", "gemini"])
     
     # Try each provider
     for prov in providers_to_try:
@@ -347,6 +381,8 @@ def enrich_brand(brand_name: str, config: dict, provider: Optional[str] = None) 
                 result = enrich_with_openai(brand_name, api_key, model)
             elif prov == "perplexity":
                 result = enrich_with_perplexity(brand_name, api_key, model)
+            elif prov == "gemini":
+                result = enrich_with_gemini(brand_name, api_key, model)
             else:
                 continue
             
@@ -572,10 +608,11 @@ Providers (by cost):
     perplexity   $0.005/lead   Cheapest, search-native
     anthropic    $0.015/lead   Claude with web search
     openai       $0.025/lead   GPT-4o with web search
+    gemini       $0.010/lead   Gemini Pro with Google Search
         """
     )
     parser.add_argument('input', nargs='*', help='CSV file or brand names')
-    parser.add_argument('--provider', '-p', choices=['anthropic', 'openai', 'perplexity'],
+    parser.add_argument('--provider', '-p', choices=['anthropic', 'openai', 'perplexity', 'gemini'],
                         help='Use specific provider instead of waterfall')
     parser.add_argument('--config', '-c', action='store_true', 
                         help='Configure API keys and settings')
@@ -610,6 +647,7 @@ Providers (by cost):
         console.print("  export PERPLEXITY_API_KEY=your_key  # Cheapest")
         console.print("  export ANTHROPIC_API_KEY=your_key")
         console.print("  export OPENAI_API_KEY=your_key")
+        console.print("  export GEMINI_API_KEY=your_key")
         return
     
     # Process input
