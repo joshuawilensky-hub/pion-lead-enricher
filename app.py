@@ -239,15 +239,27 @@ def parse_json_array(text: str) -> list:
     return []
 
 
-def search_leads(provider: str, api_key: str, source_key: str) -> List[str]:
-    """Search for restaurant brands from a source."""
+def search_leads(provider: str, api_key: str, source_key: str, exclude: List[str] = None) -> List[str]:
+    """Search for restaurant brands from a source, excluding already-known brands."""
     source = LEAD_SOURCES[source_key]
+    exclude = exclude or []
+
+    exclusion_block = ""
+    if exclude:
+        # Send up to 200 known brands to keep the prompt lean
+        sample = exclude[:200]
+        exclusion_block = f"""
+IMPORTANT: The following brands are already in our database. Do NOT include them in your results — return only brands we don't have yet:
+{json.dumps(sample)}
+"""
+
     prompt = f"""Search for: {source['query']}
 
 Find restaurant brand names. Return ONLY a JSON array of brand names:
 ["McDonald's", "Chipotle", "Panera Bread"]
 
-Focus on US restaurant chains. Return at least 20 brands. Just the JSON array."""
+Focus on US restaurant chains. Return at least 20 brands that are NOT in the exclusion list below. Dig deeper than the obvious top brands — include regional chains, emerging chains, and brands ranked 20-100 in the relevant lists. Just the JSON array.
+{exclusion_block}"""
 
     try:
         if provider == "anthropic":
@@ -538,6 +550,14 @@ cost_per_lead = {"perplexity": 0.005, "anthropic": 0.015, "openai": 0.025}
 st.sidebar.caption(f"~${cost_per_lead[provider]:.3f} per lead enrichment")
 st.sidebar.caption(f"~${cost_per_lead[provider] * 2:.3f} per lead with pitch + contacts")
 st.sidebar.markdown("---")
+db_size = len(st.session_state.get('brand_database', []))
+st.sidebar.caption(f"📦 Database: {db_size} brands")
+if db_size > 0:
+    if st.sidebar.button("🗑️ Clear database", help="Reset brand database for a fresh start"):
+        st.session_state['brand_database'] = []
+        st.session_state['found_leads'] = []
+        st.rerun()
+st.sidebar.markdown("---")
 st.sidebar.caption("Built for Pion BD - US Restaurant Vertical")
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -546,10 +566,64 @@ st.caption("Find, research, and build pitch strategies for restaurant brands")
 
 tab1, tab2, tab3, tab4 = st.tabs(["🔍 Find Leads", "📊 Enrich Leads", "🚀 Validate & Pitch", "📁 My Results"])
 
+# ── Initialise master brand database in session state ──────────────────────────
+if 'brand_database' not in st.session_state:
+    st.session_state['brand_database'] = []  # cumulative list across all runs
+
+def normalise(name: str) -> str:
+    """Lowercase + strip for dedup comparison."""
+    return name.strip().lower()
+
+def merge_into_database(new_brands: List[str]) -> tuple:
+    """Add new brands to master database, return (added, already_known)."""
+    existing_normalised = {normalise(b) for b in st.session_state['brand_database']}
+    added, dupes = [], []
+    for b in new_brands:
+        if normalise(b) not in existing_normalised:
+            st.session_state['brand_database'].append(b)
+            existing_normalised.add(normalise(b))
+            added.append(b)
+        else:
+            dupes.append(b)
+    return added, dupes
+
 # ── Tab 1: Find Leads ──────────────────────────────────────────────────────────
 with tab1:
     st.header("Find Restaurant Leads")
-    st.write("Select sources to build your prospect list:")
+
+    # ── Database status bar ────────────────────────────────────────────────────
+    db = st.session_state['brand_database']
+    db_col1, db_col2, db_col3 = st.columns([2, 2, 3])
+    db_col1.metric("📦 Brands in database", len(db))
+    db_col2.metric("🆕 New this session", len([b for b in db if b in st.session_state.get('found_leads', [])]))
+
+    with db_col3:
+        if db:
+            db_csv = pd.DataFrame({"Brand": db}).to_csv(index=False)
+            st.download_button(
+                "📥 Export full database",
+                db_csv,
+                f"pion_brand_database_{datetime.now().strftime('%Y%m%d')}.csv",
+                "text/csv",
+                help="Download all brands discovered so far"
+            )
+
+    # ── Seed database from CSV ─────────────────────────────────────────────────
+    with st.expander("📂 Seed database from existing CSV (optional)", expanded=not bool(db)):
+        st.caption("Upload a CSV of brands you've already found to prevent duplicates on future runs.")
+        seed_file = st.file_uploader("Upload existing brand list", type=["csv"], key="seed_uploader")
+        if seed_file:
+            seed_df = pd.read_csv(seed_file)
+            seed_col = next(
+                (c for c in seed_df.columns if c.lower() in ['brand', 'name', 'company', 'restaurant']),
+                seed_df.columns[0]
+            )
+            seed_brands = seed_df[seed_col].dropna().astype(str).tolist()
+            added, _ = merge_into_database(seed_brands)
+            st.success(f"✅ Seeded {len(added)} new brands into database ({len(seed_brands) - len(added)} already present)")
+
+    st.markdown("---")
+    st.write("Select sources to search for new brands:")
 
     col1, col2 = st.columns(2)
     selected_sources = []
@@ -572,30 +646,49 @@ with tab1:
         if st.checkbox("Eagle Eye Clients", help="Promo-ready brands"):
             selected_sources.append("eagleeye")
 
-    if st.button("🔍 Find Leads", type="primary", disabled=not api_key or not selected_sources):
+    if db:
+        st.info(f"🔒 Exclusion active — the {len(db)} brands already in your database will be excluded from results, surfacing only new brands.")
+
+    if st.button("🔍 Find New Leads", type="primary", disabled=not api_key or not selected_sources):
         all_brands = []
         progress = st.progress(0)
         status = st.empty()
 
+        # Pass full database as exclusion list to every source query
+        known_brands = list(st.session_state['brand_database'])
+
         for i, source_key in enumerate(selected_sources):
-            status.write(f"Searching {LEAD_SOURCES[source_key]['name']}...")
-            brands = search_leads(provider, api_key, source_key)
+            status.write(f"Searching {LEAD_SOURCES[source_key]['name']} (excluding {len(known_brands)} known brands)...")
+            brands = search_leads(provider, api_key, source_key, exclude=known_brands)
             all_brands.extend(brands)
+            # Update known list mid-run so each subsequent source also excludes
+            # brands found in earlier sources this run
+            known_brands = list(dict.fromkeys(known_brands + brands))
             progress.progress((i + 1) / len(selected_sources))
 
-        unique_brands = list(dict.fromkeys(all_brands))
-        status.write(f"✅ Found {len(unique_brands)} unique brands")
-        st.session_state['found_leads'] = unique_brands
+        # Merge into master database
+        added, dupes = merge_into_database(all_brands)
+        status.write(f"✅ Found **{len(added)} new** brands | {len(dupes)} already in database | {len(st.session_state['brand_database'])} total")
 
-        st.dataframe(pd.DataFrame({"Brand": unique_brands}), use_container_width=True)
+        st.session_state['found_leads'] = added  # only surface new ones for enrichment
 
-        csv = pd.DataFrame({"Brand": unique_brands}).to_csv(index=False)
-        st.download_button(
-            "📥 Download CSV",
-            csv,
-            f"leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            "text/csv"
-        )
+        if added:
+            st.success(f"🆕 {len(added)} new brands added to database")
+            st.dataframe(pd.DataFrame({"Brand": added}), use_container_width=True)
+
+            csv = pd.DataFrame({"Brand": added}).to_csv(index=False)
+            st.download_button(
+                "📥 Download new leads CSV",
+                csv,
+                f"new_leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                "text/csv"
+            )
+        else:
+            st.warning("No new brands found — all results were already in your database. Try different sources or check back later as lists update.")
+
+        if dupes:
+            with st.expander(f"ℹ️ {len(dupes)} duplicates skipped"):
+                st.write(", ".join(dupes))
 
 # ── Tab 2: Enrich Leads ────────────────────────────────────────────────────────
 with tab2:
