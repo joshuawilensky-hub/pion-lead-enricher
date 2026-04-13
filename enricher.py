@@ -315,7 +315,7 @@ def enrich_with_gemini(brand_name: str, api_key: str, model: str) -> dict:
     genai.configure(api_key=api_key)
     
     # Use Google Search tool for live web grounding if using a Pro model
-    tools = [{"google_search": {}}] if "pro" in model.lower() else None
+    tools = "google_search" if "pro" in model.lower() else None
     
     llm = genai.GenerativeModel(
         model_name=model,
