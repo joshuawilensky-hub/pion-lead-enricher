@@ -7,7 +7,7 @@ Providers supported:
 - anthropic: Claude with web search ($0.01-0.02/lead)
 - openai: GPT-4o with web search ($0.02-0.03/lead)  
 - perplexity: Sonar with native search ($0.005-0.01/lead) - CHEAPEST
-- gemini: Gemini 1.5 Pro with Google Search ($0.010/lead)
+- gemini: Gemini 1.5 Pro ($0.010/lead)
 
 Usage:
     python enricher.py                           # Interactive mode, uses config
@@ -304,7 +304,7 @@ def enrich_with_perplexity(brand_name: str, api_key: str, model: str) -> dict:
 
 
 def enrich_with_gemini(brand_name: str, api_key: str, model: str) -> dict:
-    """Research brand using Google Gemini with native search."""
+    """Research brand using Google Gemini."""
     try:
         import google.generativeai as genai
     except ImportError:
@@ -314,12 +314,9 @@ def enrich_with_gemini(brand_name: str, api_key: str, model: str) -> dict:
     
     genai.configure(api_key=api_key)
     
-    # Use Google Search tool for live web grounding if using a Pro model
-    tools = "google_search" if "pro" in model.lower() else None
-    
+    # Tools parameter completely removed for stability
     llm = genai.GenerativeModel(
         model_name=model,
-        tools=tools,
         system_instruction=SYSTEM_PROMPT
     )
     
@@ -608,7 +605,7 @@ Providers (by cost):
     perplexity   $0.005/lead   Cheapest, search-native
     anthropic    $0.015/lead   Claude with web search
     openai       $0.025/lead   GPT-4o with web search
-    gemini       $0.010/lead   Gemini Pro with Google Search
+    gemini       $0.010/lead   Gemini Pro
         """
     )
     parser.add_argument('input', nargs='*', help='CSV file or brand names')
