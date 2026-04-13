@@ -124,7 +124,8 @@ Focus on US restaurant chains. Return at least 20 brands. Just the JSON array.""
         elif provider == "gemini":
             import google.generativeai as genai
             genai.configure(api_key=api_key)
-            llm = genai.GenerativeModel(model_name="gemini-1.5-pro", tools="google_search")
+            # Tools parameter completely removed for stability
+            llm = genai.GenerativeModel(model_name="gemini-1.5-pro")
             response = llm.generate_content(prompt)
             text = response.text
         
@@ -180,9 +181,9 @@ def enrich_brand(provider: str, api_key: str, brand: str) -> dict:
         elif provider == "gemini":
             import google.generativeai as genai
             genai.configure(api_key=api_key)
+            # Tools parameter completely removed for stability
             llm = genai.GenerativeModel(
                 model_name="gemini-1.5-pro",
-                tools="google_search",
                 system_instruction=SYSTEM_PROMPT
             )
             response = llm.generate_content(prompt)
