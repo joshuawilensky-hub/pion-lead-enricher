@@ -120,6 +120,13 @@ Focus on US restaurant chains. Return at least 20 brands. Just the JSON array.""
                 messages=[{"role": "user", "content": prompt}]
             )
             text = response.choices[0].message.content
+            
+        elif provider == "gemini":
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            llm = genai.GenerativeModel(model_name="gemini-1.5-pro", tools=[{"google_search": {}}])
+            response = llm.generate_content(prompt)
+            text = response.text
         
         # Parse JSON
         start = text.find('[')
@@ -169,6 +176,17 @@ def enrich_brand(provider: str, api_key: str, brand: str) -> dict:
                 ]
             )
             text = response.choices[0].message.content
+            
+        elif provider == "gemini":
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            llm = genai.GenerativeModel(
+                model_name="gemini-1.5-pro",
+                tools=[{"google_search": {}}],
+                system_instruction=SYSTEM_PROMPT
+            )
+            response = llm.generate_content(prompt)
+            text = response.text
         
         # Parse JSON
         start = text.find('{')
@@ -193,8 +211,8 @@ st.sidebar.title("⚙️ Settings")
 
 provider = st.sidebar.selectbox(
     "Provider",
-    ["perplexity", "anthropic", "openai"],
-    help="Perplexity is cheapest ($0.005/lead)"
+    ["perplexity", "anthropic", "openai", "gemini"],
+    help="Perplexity is cheapest ($0.005/lead). Gemini includes Google Search."
 )
 
 # Try to get API key from secrets first, then show input
@@ -205,6 +223,8 @@ elif provider == "anthropic":
     default_key = st.secrets.get("ANTHROPIC_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
 elif provider == "openai":
     default_key = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+elif provider == "gemini":
+    default_key = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
 
 api_key = st.sidebar.text_input(
     "API Key",
@@ -213,7 +233,7 @@ api_key = st.sidebar.text_input(
     help="Your API key for the selected provider"
 )
 
-cost_per_lead = {"perplexity": 0.005, "anthropic": 0.015, "openai": 0.025}
+cost_per_lead = {"perplexity": 0.005, "anthropic": 0.015, "openai": 0.025, "gemini": 0.010}
 st.sidebar.caption(f"~${cost_per_lead[provider]:.3f} per lead")
 
 # Main content
