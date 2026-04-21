@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-Pion Restaurant Lead Enricher - Multi-Provider Edition
-Supports multiple AI providers with configurable waterfall fallback.
+Pion Restaurant Lead Enricher - CLI
+Multi-Provider Edition with configurable waterfall fallback.
+
+Researches restaurant brands for student discount status using multiple AI providers.
 
 Providers supported:
-- anthropic: Claude with web search ($0.01-0.02/lead)
-- openai: GPT-4o with web search ($0.02-0.03/lead)  
-- perplexity: Sonar with native search ($0.005-0.01/lead) - CHEAPEST
-- gemini: Gemini 1.5 Pro ($0.010/lead)
+- perplexity: Sonar with native search ($0.005/lead) - CHEAPEST
+- anthropic: Claude with web search ($0.015/lead)
+- gemini: Gemini 2.5 Flash with Google Search ($0.010/lead)
+- openai: GPT-4o ($0.025/lead)
 
 Usage:
     python enricher.py                           # Interactive mode, uses config
     python enricher.py brands.csv                # Process CSV
-    python enricher.py --provider perplexity     # Use specific provider
+    python enricher.py "Sweetgreen, Chipotle"    # Direct list
+    python enricher.py --provider anthropic       # Use specific provider
     python enricher.py --config                  # Edit API keys and settings
 
 Environment variables (or use --config to set):
     ANTHROPIC_API_KEY
-    OPENAI_API_KEY  
+    OPENAI_API_KEY
     PERPLEXITY_API_KEY
     GEMINI_API_KEY
 """
@@ -26,6 +29,7 @@ import os
 import sys
 import csv
 import json
+import re
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -53,16 +57,22 @@ CONFIG_FILE = Path.home() / ".pion_enricher_config.json"
 
 DEFAULT_CONFIG = {
     "providers": {
-        "anthropic": {
-            "api_key": "",
-            "model": "claude-sonnet-4-20250514",
-            "cost_per_lead": 0.015,
-            "enabled": True
-        },
         "perplexity": {
             "api_key": "",
             "model": "sonar",
             "cost_per_lead": 0.005,
+            "enabled": True
+        },
+        "anthropic": {
+            "api_key": "",
+            "model": "claude-sonnet-4-5",
+            "cost_per_lead": 0.015,
+            "enabled": True
+        },
+        "gemini": {
+            "api_key": "",
+            "model": "gemini-2.5-flash",
+            "cost_per_lead": 0.010,
             "enabled": True
         },
         "openai": {
@@ -71,108 +81,80 @@ DEFAULT_CONFIG = {
             "cost_per_lead": 0.025,
             "enabled": True
         },
-        "gemini": {
-            "api_key": "",
-            "model": "gemini-1.5-pro",
-            "cost_per_lead": 0.010,
-            "enabled": True
-        }
     },
-    "waterfall_order": ["perplexity", "anthropic", "openai", "gemini"],
+    "waterfall_order": ["perplexity", "anthropic", "gemini", "openai"],
     "default_provider": "perplexity"
 }
 
-SYSTEM_PROMPT = """You are a deep-research assistant for Pion (formerly Student Beans), a B2B sales tool helping Business Development Managers identify and qualify US restaurant brands as sales leads.
+SYSTEM_PROMPT = """You are a research assistant for Pion, a student discount and loyalty platform. Your job is to research restaurant brands and determine their student discount status, verification providers, and sales priority for Pion's partnership team.
 
-Pion sells student verification and marketing products to restaurant chains. Your job is to research each brand thoroughly and return a structured JSON object.
-
-For each restaurant brand, search the web and return ONLY this JSON object with no other text:
+For each brand, search the web and return ONLY this JSON object with no other text:
 {
-    "brand": "Brand Name",
+    "company": "Brand Name",
     "website": "official website URL",
-    "segment": "QSR or Fast Casual or Casual Dining or Pizza or Coffee/Bakery or Other",
-    "us_location_count": "estimated number e.g. 500, or range e.g. 200-300, or Unknown",
-    "us_presence": "Yes or No or Limited or Unclear",
-
-    "has_student_discount": "Yes or No or Unclear",
-    "student_discount_details": "describe the offer e.g. 10% off with UNiDAYS, in-store only - or None if not found",
-    "student_discount_provider": "UNiDAYS or SheerID or ID.me or Student Beans or Pion or None or Unclear",
-
-    "has_loyalty_app": "Yes or No or Unclear",
-    "loyalty_app_name": "name of app e.g. Chipotle Rewards, MyPanera - or None",
-    "loyalty_is_strategic_priority": "Yes or No or Unclear - look for press releases, app download pushes, loyalty programme marketing",
-
-    "runs_general_promos": "Yes or No or Unclear",
-    "promo_examples": "list up to 3 specific examples e.g. BOGO Tuesdays, app-exclusive 20% off, seasonal deals - or None",
-    "promo_channels": "list which apply: App / Website / In-store / Email / Social",
-
-    "pion_product_fit": "one of: Verification / Loyalty-SSO / BeansID / Media / Multiple / None",
-    "pion_tier": "Tier 1 or Tier 2 or Tier 3 or Skip",
-    "tier_rationale": "one sentence explaining why this tier was assigned",
-
-    "recommended_contact_title": "best title to reach out to e.g. VP Marketing, Head of Loyalty, CMO, Director of Digital",
-    "linkedin_search_url": "https://www.linkedin.com/search/results/people/?keywords=BRAND%20VP%20Marketing%20Head%20of%20Loyalty",
-    "notes": "any other useful context for a sales rep"
+    "us_presence": true/false,
+    "us_locations": "number or estimate",
+    "has_student_discount": true/false,
+    "discount_details": "describe the student discount or None",
+    "discount_url": "URL to student discount page or empty string",
+    "verification_provider": "Student Beans / UNiDAYS / SheerID / ID.me / In-house / None",
+    "loyalty_program": "describe loyalty/rewards program or None",
+    "app_available": true/false,
+    "social_media_presence": "strong / moderate / weak",
+    "gen_z_marketing": "describe any Gen Z / college targeting or None",
+    "competitor_discounts": "which similar brands offer student discounts",
+    "priority": "High / Medium / Low / Already Partner",
+    "priority_rationale": "one sentence",
+    "recommended_contacts": "titles to target e.g. VP Marketing, Head of Partnerships, Director of Loyalty",
+    "linkedin_search_url": "https://www.linkedin.com/search/results/people/?keywords=BRAND%20VP%20Marketing%20Partnerships",
+    "notes": "anything else useful for the sales team"
 }
 
-Tier logic - assign tiers as follows:
-- Tier 1: Brand uses UNiDAYS, SheerID, or ID.me for student verification AND has 50+ US locations. This is a displacement opportunity - Pion can replace the competitor.
-- Tier 1: Brand has an active loyalty app that is a strategic priority AND already runs a student discount. This is a Loyalty SSO (Playbook 3) opportunity.
-- Tier 2: Brand has 50+ US locations AND runs general promotions (promo-native) but has no student discount yet. Greenfield Verification + Media opportunity.
-- Tier 2: Brand has a loyalty app but no student discount programme. Entry point for Loyalty SSO pitch.
-- Tier 3: Brand has US presence but limited promo activity and no student discount. Needs more nurture.
-- Skip: Fewer than 50 US locations, or no meaningful US presence, or already on Student Beans or Pion.
-
-Product fit logic:
-- If they use a competitor verification platform -> pion_product_fit = Verification
-- If they have a loyalty app as a priority -> pion_product_fit = Loyalty-SSO
-- If they already have student verification and want to expand to other groups (graduates, military, healthcare) -> pion_product_fit = BeansID
-- If they are a large brand with no verification but run heavy promotions -> pion_product_fit = Multiple (Verification + Media)
+Priority logic:
+- High: Uses a competitor verification provider (Student Beans, UNiDAYS, SheerID) — pitch Pion as better value and reach
+- Medium: US presence, no student discount yet — greenfield opportunity to launch one
+- Already Partner: Already uses Pion or has Pion-powered discount — skip or upsell
+- Low: No US presence or very small brand
 
 Return ONLY the JSON object. No markdown, no explanation, no code fences."""
 
 
 def load_config() -> dict:
-    """Load config from file or create default."""
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
-                # Merge with defaults for any missing keys
                 for provider, settings in DEFAULT_CONFIG["providers"].items():
                     if provider not in config.get("providers", {}):
                         config.setdefault("providers", {})[provider] = settings
                 return config
-        except:
+        except Exception:
             pass
     return DEFAULT_CONFIG.copy()
 
 
 def save_config(config: dict):
-    """Save config to file."""
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
     console.print(f"[green]Config saved to {CONFIG_FILE}[/green]")
 
 
 def configure_interactive():
-    """Interactive configuration of API keys and settings."""
     config = load_config()
-    
+
     console.print(Panel.fit(
         "[bold cyan]Pion Lead Enricher Configuration[/bold cyan]\n\n"
         "Configure your API keys and provider preferences.",
         title="Settings"
     ))
-    
-    # Show current status
+
     console.print("\n[bold]Current Provider Status:[/bold]")
     table = Table(show_header=True)
     table.add_column("Provider")
     table.add_column("API Key")
     table.add_column("Cost/Lead")
     table.add_column("Enabled")
-    
+
     for name, settings in config["providers"].items():
         key_status = "✓ Set" if settings.get("api_key") else "✗ Not set"
         key_style = "green" if settings.get("api_key") else "red"
@@ -183,64 +165,40 @@ def configure_interactive():
             "Yes" if settings.get("enabled") else "No"
         )
     console.print(table)
-    
-    # Configure each provider
+
     console.print("\n[bold]Configure Providers:[/bold]")
-    for name in ["perplexity", "anthropic", "openai", "gemini"]:
+    for name in ["perplexity", "anthropic", "gemini", "openai"]:
         settings = config["providers"].get(name, {})
-        
         if Confirm.ask(f"\nConfigure {name}?", default=False):
-            # API Key
             current_key = settings.get("api_key", "")
             masked = f"...{current_key[-8:]}" if current_key else "not set"
-            new_key = Prompt.ask(
-                f"  API Key (current: {masked})",
-                default="",
-                password=True
-            )
+            new_key = Prompt.ask(f"  API Key (current: {masked})", default="", password=True)
             if new_key:
                 config["providers"][name]["api_key"] = new_key
-            
-            # Enable/disable
             config["providers"][name]["enabled"] = Confirm.ask(
-                f"  Enable {name}?",
-                default=settings.get("enabled", True)
-            )
-    
-    # Waterfall order
+                f"  Enable {name}?", default=settings.get("enabled", True))
+
     console.print("\n[bold]Waterfall Order:[/bold]")
-    console.print("  Providers are tried in this order if one fails.")
     console.print(f"  Current: {' → '.join(config.get('waterfall_order', []))}")
-    
     if Confirm.ask("Change waterfall order?", default=False):
-        console.print("  Enter provider names in order (comma-separated):")
-        console.print("  Available: perplexity, anthropic, openai, gemini")
-        order_input = Prompt.ask("  Order", default="perplexity,anthropic,openai,gemini")
+        console.print("  Available: perplexity, anthropic, gemini, openai")
+        order_input = Prompt.ask("  Order", default="perplexity,anthropic,gemini,openai")
         config["waterfall_order"] = [p.strip() for p in order_input.split(",")]
-    
-    # Default provider
+
     config["default_provider"] = Prompt.ask(
         "\nDefault provider",
-        choices=["perplexity", "anthropic", "openai", "gemini"],
+        choices=["perplexity", "anthropic", "gemini", "openai"],
         default=config.get("default_provider", "perplexity")
     )
-    
+
     save_config(config)
-    
-    # Show final config
     console.print("\n[bold green]Configuration complete![/bold green]")
-    console.print(f"Default provider: {config['default_provider']}")
-    console.print(f"Waterfall order: {' → '.join(config['waterfall_order'])}")
 
 
 def get_api_key(provider: str, config: dict) -> Optional[str]:
-    """Get API key from config or environment."""
-    # Check config first
     key = config.get("providers", {}).get(provider, {}).get("api_key")
     if key:
         return key
-    
-    # Fall back to environment
     env_map = {
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
@@ -250,110 +208,16 @@ def get_api_key(provider: str, config: dict) -> Optional[str]:
     return os.environ.get(env_map.get(provider, ""))
 
 
-def enrich_with_anthropic(brand_name: str, api_key: str, model: str) -> dict:
-    """Research brand using Claude with web search."""
-    try:
-        from anthropic import Anthropic
-    except ImportError:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "anthropic", "-q"])
-        from anthropic import Anthropic
-    
-    client = Anthropic(api_key=api_key)
-    
-    message = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        system=SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": f'Research "{brand_name}" restaurant for student discount status. Return only JSON.'
-        }]
-    )
-    
-    text_content = ""
-    for block in message.content:
-        if hasattr(block, 'text'):
-            text_content += block.text
-    
-    return parse_json_response(text_content, brand_name)
+def _clean_text(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r'```(?:json|JSON)?\s*', '', text)
+    text = text.replace('```', '')
+    return text.strip()
 
 
-def enrich_with_openai(brand_name: str, api_key: str, model: str) -> dict:
-    """Research brand using OpenAI with web search."""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai", "-q"])
-        from openai import OpenAI
-    
-    client = OpenAI(api_key=api_key)
-    
-    response = client.chat.completions.create(
-        model=model,
-        web_search_options={"search_context_size": "medium"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f'Research "{brand_name}" restaurant for student discount status. Return only JSON.'}
-        ]
-    )
-    
-    text_content = response.choices[0].message.content
-    return parse_json_response(text_content, brand_name)
-
-
-def enrich_with_perplexity(brand_name: str, api_key: str, model: str) -> dict:
-    """Research brand using Perplexity Sonar (search-native, cheapest)."""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai", "-q"])
-        from openai import OpenAI
-    
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.perplexity.ai"
-    )
-    
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f'Research "{brand_name}" restaurant for student discount status. Search for their website, US presence, and whether they offer student discounts through Student Beans, UNiDAYS, SheerID, or ID.me. Return only JSON.'}
-        ]
-    )
-    
-    text_content = response.choices[0].message.content
-    return parse_json_response(text_content, brand_name)
-
-
-def enrich_with_gemini(brand_name: str, api_key: str, model: str) -> dict:
-    """Research brand using Google Gemini."""
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "google-generativeai", "-q"])
-        import google.generativeai as genai
-    
-    genai.configure(api_key=api_key)
-    
-    # Tools parameter completely removed for stability
-    llm = genai.GenerativeModel(
-        model_name=model,
-        system_instruction=SYSTEM_PROMPT
-    )
-    
-    response = llm.generate_content(f'Research "{brand_name}" restaurant for student discount status. Return only JSON.')
-    
-    return parse_json_response(response.text, brand_name)
-
-
-def parse_json_response(text: str, brand_name: str) -> dict:
-    """Parse JSON from LLM response."""
+def parse_json_response(text: str, company_name: str) -> dict:
+    text = _clean_text(text)
     try:
         start = text.find('{')
         end = text.rfind('}') + 1
@@ -361,260 +225,322 @@ def parse_json_response(text: str, brand_name: str) -> dict:
             return json.loads(text[start:end])
     except json.JSONDecodeError:
         pass
-    
     return {
-        "brand": brand_name,
+        "company": company_name,
         "website": "",
-        "us_presence": "Error",
-        "has_student_discount": "Error",
-        "discount_url": "",
+        "us_presence": False,
+        "has_student_discount": False,
         "verification_provider": "Error",
         "priority": "Error",
         "notes": f"Parse error: {text[:100]}"
     }
 
 
-def enrich_brand(brand_name: str, config: dict, provider: Optional[str] = None) -> tuple[dict, str]:
-    """
-    Research a brand using configured provider(s).
-    Returns (result_dict, provider_used)
-    """
-    # Determine provider order
+def enrich_with_anthropic(company_name: str, api_key: str, model: str) -> dict:
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "anthropic", "-q"])
+        from anthropic import Anthropic
+
+    client = Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model=model, max_tokens=2048,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user",
+                   "content": f'Research "{company_name}" for Pion student discount sales prospecting. Find their student discount status, verification provider, loyalty program, and Gen Z marketing efforts. Return only JSON.'}]
+    )
+    text_content = "".join(b.text for b in message.content if hasattr(b, 'text'))
+    return parse_json_response(text_content, company_name)
+
+
+def enrich_with_gemini(company_name: str, api_key: str, model: str) -> dict:
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "google-genai", "-q"])
+        from google import genai
+        from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+    response = client.models.generate_content(
+        model=model,
+        contents=f'Research "{company_name}" for Pion student discount sales prospecting. Find their student discount status, verification provider, loyalty program, and Gen Z marketing efforts. Return only JSON.',
+        config=config,
+    )
+    if response.text:
+        return parse_json_response(response.text, company_name)
+    try:
+        parts = response.candidates[0].content.parts
+        text = "".join(p.text for p in parts if hasattr(p, "text") and p.text) or ""
+        return parse_json_response(text, company_name)
+    except Exception:
+        return parse_json_response("", company_name)
+
+
+def enrich_with_openai(company_name: str, api_key: str, model: str) -> dict:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai", "-q"])
+        from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f'Research "{company_name}" for Pion student discount sales prospecting. Find their student discount status, verification provider, loyalty program, and Gen Z marketing efforts. Return only JSON.'}
+        ]
+    )
+    return parse_json_response(response.choices[0].message.content, company_name)
+
+
+def enrich_with_perplexity(company_name: str, api_key: str, model: str) -> dict:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai", "-q"])
+        from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f'Research "{company_name}" for Pion student discount sales prospecting. Search for their student discount page, verification provider (Student Beans, UNiDAYS, SheerID, ID.me), loyalty program, and Gen Z marketing. Return only JSON.'}
+        ]
+    )
+    return parse_json_response(response.choices[0].message.content, company_name)
+
+
+def enrich_company(company_name: str, config: dict, provider: Optional[str] = None) -> tuple:
     if provider:
         providers_to_try = [provider]
     else:
-        providers_to_try = config.get("waterfall_order", ["perplexity", "anthropic", "openai", "gemini"])
-    
-    # Try each provider
+        providers_to_try = config.get("waterfall_order", ["perplexity", "anthropic", "gemini", "openai"])
+
     for prov in providers_to_try:
         settings = config.get("providers", {}).get(prov, {})
-        
         if not settings.get("enabled", True):
             continue
-        
         api_key = get_api_key(prov, config)
         if not api_key:
             continue
-        
         model = settings.get("model", "")
-        
+
         try:
             if prov == "anthropic":
-                result = enrich_with_anthropic(brand_name, api_key, model)
-            elif prov == "openai":
-                result = enrich_with_openai(brand_name, api_key, model)
-            elif prov == "perplexity":
-                result = enrich_with_perplexity(brand_name, api_key, model)
+                result = enrich_with_anthropic(company_name, api_key, model)
             elif prov == "gemini":
-                result = enrich_with_gemini(brand_name, api_key, model)
+                result = enrich_with_gemini(company_name, api_key, model)
+            elif prov == "openai":
+                result = enrich_with_openai(company_name, api_key, model)
+            elif prov == "perplexity":
+                result = enrich_with_perplexity(company_name, api_key, model)
             else:
                 continue
-            
-            if result.get("us_presence") != "Error":
+
+            if result.get("priority") != "Error":
                 return result, prov
-                
         except Exception as e:
             console.print(f"[yellow]  {prov} failed: {str(e)[:50]}[/yellow]")
             continue
-    
+
     return {
-        "brand": brand_name,
-        "website": "",
-        "us_presence": "Error",
-        "has_student_discount": "Error",
-        "discount_url": "",
-        "verification_provider": "Error",
-        "priority": "Error",
-        "notes": "All providers failed"
+        "company": company_name, "website": "", "us_presence": False,
+        "has_student_discount": False, "verification_provider": "Error",
+        "priority": "Error", "notes": "All providers failed"
     }, "none"
 
 
-def generate_linkedin_url(brand_name: str) -> str:
-    """Generate LinkedIn search URL for marketing contacts."""
+def generate_linkedin_url(company_name: str) -> str:
     import urllib.parse
-    query = f"{brand_name} VP Marketing Director Marketing CMO Head of Partnerships"
+    query = f"{company_name} VP Marketing Head of Partnerships Director Loyalty"
     return f"https://www.linkedin.com/search/results/people/?keywords={urllib.parse.quote(query)}"
 
 
 def display_results(results: list, providers_used: dict):
-    """Display results in a formatted table."""
-    table = Table(title="Pion Restaurant Lead Enrichment Results", show_lines=True)
-    
+    table = Table(title="Pion Restaurant Lead Research Results", show_lines=True)
     table.add_column("Brand", style="cyan", no_wrap=True)
-    table.add_column("US", width=8)
-    table.add_column("Discount", width=10)
-    table.add_column("Provider", width=14)
-    table.add_column("Priority", width=12)
+    table.add_column("US Locs", width=8)
+    table.add_column("Student Disc.", width=12)
+    table.add_column("Verification", width=14)
+    table.add_column("Loyalty", width=14)
+    table.add_column("Priority", width=16)
     table.add_column("Source", width=10, style="dim")
-    
-    priority_colors = {
-        "High": "green",
-        "Medium": "yellow", 
-        "Already Partner": "blue",
-        "Low": "dim",
-        "Error": "red"
-    }
-    
+
+    priority_colors = {"High": "green", "Medium": "yellow", "Low": "red",
+                       "Already Partner": "blue", "Error": "red"}
+
     for r in results:
         priority = r.get("priority", "Unknown")
-        priority_style = priority_colors.get(priority, "white")
-        brand = r.get("brand", "")
-        
+        p_style = priority_colors.get(priority, "white")
+        company = r.get("company", "")
+        has_disc = "✅ Yes" if r.get("has_student_discount") else "❌ No"
+        loyalty = str(r.get("loyalty_program", ""))[:14]
+        if len(str(r.get("loyalty_program", ""))) > 14:
+            loyalty += "…"
+
         table.add_row(
-            brand,
-            r.get("us_presence", ""),
-            r.get("has_student_discount", ""),
-            r.get("verification_provider", "")[:14],
-            f"[{priority_style}]{priority}[/{priority_style}]",
-            providers_used.get(brand, "")[:10]
+            company,
+            str(r.get("us_locations", ""))[:8],
+            has_disc,
+            r.get("verification_provider", "None")[:14],
+            loyalty,
+            f"[{p_style}]{priority}[/{p_style}]",
+            providers_used.get(company, "")[:10]
         )
-    
+
     console.print(table)
-    
-    # Summary
+
     high = sum(1 for r in results if r.get("priority") == "High")
-    medium = sum(1 for r in results if r.get("priority") == "Medium")
+    med = sum(1 for r in results if r.get("priority") == "Medium")
     already = sum(1 for r in results if r.get("priority") == "Already Partner")
-    
+    low = sum(1 for r in results if r.get("priority") == "Low")
+
     console.print(f"\n[bold]Summary:[/bold]")
-    console.print(f"  [green]High priority:[/green] {high}")
-    console.print(f"  [yellow]Medium priority:[/yellow] {medium}")
+    console.print(f"  [green]High (competitor verification — pitch Pion):[/green] {high}")
+    console.print(f"  [yellow]Medium (no discount — greenfield):[/yellow] {med}")
     console.print(f"  [blue]Already Partner:[/blue] {already}")
-    
-    # Cost estimate
+    console.print(f"  [red]Low:[/red] {low}")
+
+    config = load_config()
     provider_counts = {}
     for p in providers_used.values():
         provider_counts[p] = provider_counts.get(p, 0) + 1
-    
-    config = load_config()
-    total_cost = 0
-    for prov, count in provider_counts.items():
-        cost = config.get("providers", {}).get(prov, {}).get("cost_per_lead", 0.01)
-        total_cost += cost * count
-    
+    total_cost = sum(
+        config.get("providers", {}).get(prov, {}).get("cost_per_lead", 0.01) * count
+        for prov, count in provider_counts.items()
+    )
     console.print(f"\n[dim]Estimated API cost: ${total_cost:.2f}[/dim]")
 
 
 def save_results(results: list, output_path: str):
-    """Save results to CSV file."""
     fieldnames = [
-        "Brand", "Website", "US Presence", "Has Student Discount", 
-        "Discount URL", "Verification Provider", "LinkedIn Search", 
-        "Priority", "Notes"
+        "Brand", "Website", "US Presence", "US Locations",
+        "Has Student Discount", "Discount Details", "Discount URL",
+        "Verification Provider", "Loyalty Program", "App Available",
+        "Gen Z Marketing", "Priority", "Priority Rationale",
+        "Recommended Contacts", "LinkedIn Search", "Notes"
     ]
-    
+
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        
         for r in results:
             writer.writerow({
-                "Brand": r.get("brand", ""),
+                "Brand": r.get("company", ""),
                 "Website": r.get("website", ""),
                 "US Presence": r.get("us_presence", ""),
+                "US Locations": r.get("us_locations", ""),
                 "Has Student Discount": r.get("has_student_discount", ""),
+                "Discount Details": r.get("discount_details", ""),
                 "Discount URL": r.get("discount_url", ""),
                 "Verification Provider": r.get("verification_provider", ""),
-                "LinkedIn Search": generate_linkedin_url(r.get("brand", "")),
+                "Loyalty Program": r.get("loyalty_program", ""),
+                "App Available": r.get("app_available", ""),
+                "Gen Z Marketing": r.get("gen_z_marketing", ""),
                 "Priority": r.get("priority", ""),
-                "Notes": r.get("notes", "")
+                "Priority Rationale": r.get("priority_rationale", ""),
+                "Recommended Contacts": r.get("recommended_contacts", ""),
+                "LinkedIn Search": generate_linkedin_url(r.get("company", "")),
+                "Notes": r.get("notes", ""),
             })
-    
+
     console.print(f"\n[green]✓ Results saved to:[/green] {output_path}")
 
 
-def load_brands_from_csv(filepath: str) -> list:
-    """Load brand names from a CSV file."""
-    brands = []
+def load_companies_from_csv(filepath: str) -> list:
+    companies = []
     with open(filepath, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
         for row in reader:
             if row and row[0].strip():
-                if row[0].lower() in ['brand', 'name', 'company', 'restaurant']:
+                if row[0].lower() in ['company', 'name', 'brand', 'organization', 'org']:
                     continue
-                brands.append(row[0].strip())
-    return brands
+                companies.append(row[0].strip())
+    return companies
 
 
-def process_brands(brands: list, config: dict, provider: Optional[str] = None):
-    """Process a list of brands and display/save results."""
+def process_companies(companies: list, config: dict, provider: Optional[str] = None):
     results = []
     providers_used = {}
-    
-    # Show which provider(s) we'll use
+
     if provider:
         console.print(f"[cyan]Using provider: {provider}[/cyan]")
     else:
         console.print(f"[cyan]Waterfall: {' → '.join(config.get('waterfall_order', []))}[/cyan]")
-    
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console
-    ) as progress:
-        task = progress.add_task("Researching brands...", total=len(brands))
-        
-        for brand in brands:
-            progress.update(task, description=f"Researching: {brand}")
-            result, prov_used = enrich_brand(brand, config, provider)
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as progress:
+        task = progress.add_task("Researching brands...", total=len(companies))
+        for company in companies:
+            progress.update(task, description=f"Researching: {company}")
+            result, prov_used = enrich_company(company, config, provider)
             results.append(result)
-            providers_used[brand] = prov_used
+            providers_used[company] = prov_used
             progress.advance(task)
-    
+
     console.print()
     display_results(results, providers_used)
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = f"pion_leads_{timestamp}.csv"
     save_results(results, output_path)
-    
-    # Show top priorities
-    high_priority = [r for r in results if r.get("priority") == "High"]
-    if high_priority:
-        console.print(f"\n[bold green]🎯 Top targets:[/bold green]")
-        for r in high_priority:
-            console.print(f"  • {r['brand']}: {r.get('verification_provider', '')} - {r.get('notes', '')[:60]}")
+
+    high = [r for r in results if r.get("priority") == "High"]
+    if high:
+        console.print(f"\n[bold green]🎯 Top targets (High priority):[/bold green]")
+        for r in high:
+            console.print(f"  • {r['company']}: {r.get('verification_provider', '')} — {r.get('priority_rationale', '')[:80]}")
 
 
 def interactive_mode(config: dict, provider: Optional[str] = None):
-    """Run in interactive mode."""
     console.print(Panel.fit(
         "[bold cyan]Pion Restaurant Lead Enricher[/bold cyan]\n\n"
-        "Enter restaurant brand names to research.\n"
+        "Enter brand names to research for student discount partnerships.\n"
         "Type 'done' when finished, 'quit' to exit.",
         title="Welcome"
     ))
-    
-    # Show provider status
+
     available = []
     for name, settings in config.get("providers", {}).items():
         if settings.get("enabled") and get_api_key(name, config):
             available.append(f"{name} (${settings.get('cost_per_lead', 0):.3f}/lead)")
-    
+
     if not available:
         console.print("[red]No providers configured! Run with --config to set up.[/red]")
         return
-    
+
     console.print(f"[dim]Available providers: {', '.join(available)}[/dim]")
-    
-    brands = []
+
+    companies = []
     console.print("\n[bold]Enter brand names (one per line, 'done' to process):[/bold]")
-    
+
     while True:
         try:
-            brand = input("> ").strip()
+            company = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             break
-            
-        if brand.lower() == 'quit':
+        if company.lower() == 'quit':
             return
-        if brand.lower() == 'done':
+        if company.lower() == 'done':
             break
-        if brand:
-            brands.append(brand)
-    
-    if brands:
-        process_brands(brands, config, provider)
+        if company:
+            companies.append(company)
+
+    if companies:
+        process_companies(companies, config, provider)
 
 
 def main():
@@ -625,56 +551,50 @@ def main():
 Examples:
     python enricher.py                              # Interactive mode
     python enricher.py brands.csv                   # Process CSV
-    python enricher.py --provider perplexity        # Use specific provider
+    python enricher.py "Sweetgreen, Chipotle"       # Direct list
+    python enricher.py --provider anthropic          # Use specific provider
     python enricher.py --config                     # Configure API keys
-    
+
 Providers (by cost):
     perplexity   $0.005/lead   Cheapest, search-native
+    gemini       $0.010/lead   Gemini 2.5 Flash + Google Search
     anthropic    $0.015/lead   Claude with web search
-    openai       $0.025/lead   GPT-4o with web search
-    gemini       $0.010/lead   Gemini Pro
+    openai       $0.025/lead   GPT-4o
         """
     )
     parser.add_argument('input', nargs='*', help='CSV file or brand names')
     parser.add_argument('--provider', '-p', choices=['anthropic', 'openai', 'perplexity', 'gemini'],
                         help='Use specific provider instead of waterfall')
-    parser.add_argument('--config', '-c', action='store_true', 
-                        help='Configure API keys and settings')
-    parser.add_argument('--show-config', action='store_true',
-                        help='Show current configuration')
-    
+    parser.add_argument('--config', '-c', action='store_true', help='Configure API keys and settings')
+    parser.add_argument('--show-config', action='store_true', help='Show current configuration')
+
     args = parser.parse_args()
-    
-    # Configuration mode
+
     if args.config:
         configure_interactive()
         return
-    
+
     config = load_config()
-    
-    # Show config mode
+
     if args.show_config:
         console.print(json.dumps(config, indent=2, default=str))
         return
-    
-    # Check if any provider is available
-    has_provider = False
-    for name in config.get("waterfall_order", []):
-        if get_api_key(name, config) and config.get("providers", {}).get(name, {}).get("enabled"):
-            has_provider = True
-            break
-    
+
+    has_provider = any(
+        get_api_key(name, config) and config.get("providers", {}).get(name, {}).get("enabled")
+        for name in config.get("waterfall_order", [])
+    )
+
     if not has_provider:
         console.print("[yellow]No API keys configured.[/yellow]")
         console.print("Run [bold]python enricher.py --config[/bold] to set up providers.")
         console.print("\nOr set environment variables:")
         console.print("  export PERPLEXITY_API_KEY=your_key  # Cheapest")
         console.print("  export ANTHROPIC_API_KEY=your_key")
-        console.print("  export OPENAI_API_KEY=your_key")
         console.print("  export GEMINI_API_KEY=your_key")
+        console.print("  export OPENAI_API_KEY=your_key")
         return
-    
-    # Process input
+
     if not args.input:
         interactive_mode(config, args.provider)
     elif len(args.input) == 1 and args.input[0].endswith('.csv'):
@@ -682,15 +602,15 @@ Providers (by cost):
         if not Path(filepath).exists():
             console.print(f"[red]File not found: {filepath}[/red]")
             sys.exit(1)
-        brands = load_brands_from_csv(filepath)
-        console.print(f"[cyan]Loaded {len(brands)} brands from {filepath}[/cyan]")
-        process_brands(brands, config, args.provider)
+        companies = load_companies_from_csv(filepath)
+        console.print(f"[cyan]Loaded {len(companies)} brands from {filepath}[/cyan]")
+        process_companies(companies, config, args.provider)
     elif len(args.input) == 1 and ',' in args.input[0]:
-        brands = [b.strip() for b in args.input[0].split(',') if b.strip()]
-        process_brands(brands, config, args.provider)
+        companies = [c.strip() for c in args.input[0].split(',') if c.strip()]
+        process_companies(companies, config, args.provider)
     else:
-        brands = [b.strip() for b in args.input if b.strip()]
-        process_brands(brands, config, args.provider)
+        companies = [c.strip() for c in args.input if c.strip()]
+        process_companies(companies, config, args.provider)
 
 
 if __name__ == "__main__":
