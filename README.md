@@ -1,144 +1,99 @@
-# Pion Restaurant Lead Enricher - Multi-Provider Edition
+# Pion Restaurant Lead Enricher
 
-Research restaurant brands for student discount status using multiple AI providers with configurable waterfall fallback.
+Four-step workflow to find, research, contact, and pitch restaurant brands for student discount partnerships.
+
+**Find → Research → Contacts → Pitch**
+
+## What's New
+
+- **4-tab Streamlit UI** — full workflow from discovery to personalized outreach
+- **Gemini provider** — Gemini 2.5 Flash with Google Search grounding ($0.010/lead)
+- **Find tab** — discover restaurant brands by source and segment
+- **Contacts tab** — find Marketing, Partnerships, and Digital/Loyalty decision-makers
+- **Pitch tab** — generate persona-targeted cold emails with objection handling
+- **Filters & metrics** — priority scoring, confidence levels, styled data tables
+- **Multi-input** — CSV upload, manual entry, or carry forward from previous tabs
 
 ## Providers & Cost Comparison
 
 | Provider | Cost/Lead | Notes |
 |----------|-----------|-------|
 | **Perplexity** | $0.005 | Cheapest, search-native |
+| **Gemini** | $0.010 | Google Search grounding, generous free tier |
 | **Anthropic** | $0.015 | Claude with web search |
-| **OpenAI** | $0.025 | GPT-4o with web search |
-
-vs. alternatives:
-- Apollo.io: $0.10-0.50/lead (contact data, not discount research)
-- ZoomInfo: $0.50-1.00+/lead (overkill)
-- Manual: $2-5/lead (your time at 10-15 min each)
+| **OpenAI** | $0.025 | GPT-4o |
 
 ## Quick Start
 
-```bash
-# Install
-pip install rich anthropic openai
+### Streamlit App (Recommended)
 
-# Configure (interactive setup)
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Select your provider and paste your API key in the sidebar.
+
+### CLI Enricher
+
+```bash
+# Interactive setup
 python enricher.py --config
 
 # Or set environment variables
 export PERPLEXITY_API_KEY=your_key
 export ANTHROPIC_API_KEY=your_key
+export GEMINI_API_KEY=your_key
 export OPENAI_API_KEY=your_key
 
 # Run
-python enricher.py
-```
-
-## Usage
-
-### Interactive Configuration
-```bash
-python enricher.py --config
-```
-Set API keys, enable/disable providers, configure waterfall order.
-
-### Process Brands
-```bash
-# Interactive mode
-python enricher.py
-
-# From CSV
 python enricher.py brands.csv
-
-# Direct list
 python enricher.py "Sweetgreen, Chipotle, CAVA"
-```
-
-### Choose Provider
-```bash
-# Use cheapest (Perplexity)
-python enricher.py --provider perplexity brands.csv
-
-# Use Claude (best quality)
 python enricher.py --provider anthropic brands.csv
-
-# Use GPT-4o
-python enricher.py --provider openai brands.csv
 ```
 
-### Waterfall Mode (Default)
-If no --provider specified, tries providers in order until one succeeds:
-1. Perplexity (cheapest)
-2. Anthropic (if Perplexity fails)
-3. OpenAI (last resort)
+## Workflow
 
-Change order with `--config`.
+### 1. Find
+Search for US restaurant brands by source type and segment. Sources include general search, fastest-growing chains, student-friendly brands, and brands with loyalty programs.
 
-## Configuration
+### 2. Research
+Deep-dive into each brand's student discount status, verification provider (Student Beans, UNiDAYS, SheerID, ID.me), loyalty program, and Gen Z marketing posture.
 
-Config saved to `~/.pion_enricher_config.json`
+### 3. Contacts
+Find decision-makers by persona — Marketing Leaders, Partnerships/BD, and Digital/Loyalty owners. Each contact includes title, LinkedIn search URL, and confidence level.
 
-```json
-{
-  "providers": {
-    "perplexity": {
-      "api_key": "pplx-xxx",
-      "model": "sonar",
-      "cost_per_lead": 0.005,
-      "enabled": true
-    },
-    "anthropic": {
-      "api_key": "sk-ant-xxx", 
-      "model": "claude-sonnet-4-20250514",
-      "cost_per_lead": 0.015,
-      "enabled": true
-    },
-    "openai": {
-      "api_key": "sk-xxx",
-      "model": "gpt-4o",
-      "cost_per_lead": 0.025,
-      "enabled": true
-    }
-  },
-  "waterfall_order": ["perplexity", "anthropic", "openai"],
-  "default_provider": "perplexity"
-}
-```
-
-## Output
-
-CSV with:
-- Brand, Website, US Presence
-- Has Student Discount, Discount URL
-- Verification Provider (Student Beans, UNiDAYS, SheerID, ID.me, None)
-- LinkedIn Search URL (pre-built)
-- Priority (High/Medium/Low/Already Partner)
-- Notes
+### 4. Pitch
+Generate personalized outreach with email subjects, opening lines, talking points, estimated impact, objection handling, and CTAs — all tailored to the contact's persona and the brand's current discount status.
 
 ## Priority Logic
 
 | Priority | Meaning | Action |
 |----------|---------|--------|
-| **High** | Uses competitor verification | Pitch Pion as better value |
-| **Medium** | US presence, no discount | Greenfield opportunity |
-| **Already Partner** | On Student Beans/Pion | Skip or upsell |
-| **Low** | No US presence | Don't pursue |
+| **High** | Uses competitor verification (Student Beans, UNiDAYS, SheerID) | Pitch Pion as better value |
+| **Medium** | US presence, no student discount | Greenfield opportunity |
+| **Already Partner** | On Pion or Student Beans | Skip or upsell |
+| **Low** | No US presence or tiny brand | Don't pursue |
+
+## Output
+
+Each tab exports CSV with all enriched data. The Research tab includes:
+
+- Brand, Website, US Presence, US Locations
+- Has Student Discount, Discount URL
+- Verification Provider
+- Loyalty Program, App Available
+- Gen Z Marketing signals
+- Priority with rationale
 
 ## API Keys
 
-### Perplexity (Cheapest)
-1. Go to https://www.perplexity.ai/settings/api
-2. Create API key
-3. Add credits ($5 minimum)
-
-### Anthropic
-1. Go to https://console.anthropic.com/
-2. Create API key
-3. Add credits
-
-### OpenAI
-1. Go to https://platform.openai.com/api-keys
-2. Create API key
-3. Add credits
+| Provider | Where to get |
+|----------|-------------|
+| Perplexity | https://www.perplexity.ai/settings/api |
+| Gemini | https://aistudio.google.com/apikey |
+| Anthropic | https://console.anthropic.com/ |
+| OpenAI | https://platform.openai.com/api-keys |
 
 ## Sample Brands
 
@@ -157,15 +112,16 @@ Jersey Mike's
 
 ## Cost Examples
 
-| Brands | Perplexity | Anthropic | OpenAI |
-|--------|------------|-----------|--------|
-| 10 | $0.05 | $0.15 | $0.25 |
-| 50 | $0.25 | $0.75 | $1.25 |
-| 100 | $0.50 | $1.50 | $2.50 |
+| Brands | Perplexity | Gemini | Anthropic | OpenAI |
+|--------|------------|--------|-----------|--------|
+| 10 | $0.05 | $0.10 | $0.15 | $0.25 |
+| 50 | $0.25 | $0.50 | $0.75 | $1.25 |
+| 100 | $0.50 | $1.00 | $1.50 | $2.50 |
 
 ## Tips
 
-- Start with Perplexity for bulk research (cheapest)
-- Use Anthropic for high-value targets (best quality)
-- Waterfall handles rate limits and failures automatically
-- Results show which provider was used for each brand
+- Start with **Perplexity** for bulk research (cheapest)
+- Use **Gemini** for a good balance of cost and quality with Google Search grounding
+- Use **Anthropic** for high-value targets (best quality)
+- The **Find** tab is great for discovering new brands; **Research** tab works best with known brand lists
+- Waterfall mode (CLI) handles rate limits and failures automatically
